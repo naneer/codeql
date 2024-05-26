@@ -9,6 +9,7 @@
 private import python
 private import semmle.python.Concepts
 private import semmle.python.ApiGraphs
+private import semmle.python.dataflow.new.TypeTracking
 private import semmle.python.dataflow.new.TaintTracking
 private import semmle.python.frameworks.internal.InstanceTaintStepsHelper
 private import semmle.python.frameworks.Stdlib
@@ -58,6 +59,63 @@ module Requests {
       methodName = "request" and
       result = this.getArg(1)
     }
+
+    override predicate disablesCertificateValidation(
+      DataFlow::Node disablingNode, DataFlow::Node argumentOrigin
+    ) {
+      disablingNode = this.getKeywordParameter("verify").asSink() and
+      argumentOrigin = this.getKeywordParameter("verify").getAValueReachingSink() and
+      // requests treats `None` as the default and all other "falsey" values as `False`.
+      argumentOrigin.asExpr().(ImmutableLiteral).booleanValue() = false and
+      not argumentOrigin.asExpr() instanceof None
+    }
+
+    override string getFramework() { result = "requests" }
+  }
+
+  /**
+   * An outgoing Http Requests using Prepared Request, from the `requests` library 
+   * 
+   * See https://requests.readthedocs.io/en/latest/user/advanced/#prepared-requests
+   */
+  module RequestObject {
+    private class RequestObject extends DataFlow::CfgNode {
+      RequestObject() { 
+          this = API::moduleImport("requests").getMember("Request").getACall()
+      }
+    }
+
+    /** Gets a reference to an instance of `requests.Request`. */
+    private DataFlow::TypeTrackingNode instance(TypeTracker tt) {
+      tt.start() and
+      result instanceof RequestObject
+      or
+      exists(TypeTracker tt2 | 
+        tt = tt2.step(instance(tt2), result))
+    }
+
+    /** Gets a reference to an instance of `requests.Request`. */
+    DataFlow::CallCfgNode instance() { instance(TypeTracker::end()).flowsTo(result) }
+  }
+
+  private class OutgoingSessionSendCall extends Http::Client::Request::Range, API::CallNode {
+    OutgoingSessionSendCall() {
+      this = API::moduleImport("requests").getMember("Session").getReturn().getMember("send").getACall()
+    }
+    override DataFlow::Node getAUrlPart() {
+      result = this.myRequestObject().getArg(1)
+    }
+
+    private DataFlow::TypeTrackingNode myRequestObject(TypeBackTracker t) {
+      t.start() and 
+      result = (RequestObject::instance()).getALocalSource()
+      or
+      exists (TypeBackTracker t2 | 
+        t = t2.step(result, this.myRequestObject(t2))
+      )
+    }
+
+    DataFlow::CallCfgNode myRequestObject() { result = this.myRequestObject(TypeBackTracker::end())}
 
     override predicate disablesCertificateValidation(
       DataFlow::Node disablingNode, DataFlow::Node argumentOrigin
